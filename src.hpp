@@ -40,8 +40,54 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     gpu_sim.MoveMatrixToSharedMem(value_matrix);
 
     gpu_sim.Transpose(key_matrix, kInSharedMemory);
-    Matrix *scores = matrix_memory_allocator.Allocate("scores");
-    gpu_sim.MatMul(query, key_matrix, scores);
+    Matrix *scores = nullptr;
+    constexpr size_t kFeatureBlock = 64;
+    const size_t feature_count = query->GetColumnNum();
+    for (size_t first_feature = 0; first_feature < feature_count;
+         first_feature += kFeatureBlock) {
+      const size_t last_feature =
+          std::min(first_feature + kFeatureBlock, feature_count);
+      Matrix *query_block = nullptr;
+      Matrix *key_block = nullptr;
+      for (size_t feature = first_feature; feature < last_feature; ++feature) {
+        Matrix *query_column = matrix_memory_allocator.Allocate("query column");
+        Matrix *key_row = matrix_memory_allocator.Allocate("key row");
+        gpu_sim.GetColumn(query, feature, query_column, kInSharedMemory);
+        gpu_sim.GetRow(key_matrix, feature, key_row, kInSharedMemory);
+        if (query_block == nullptr) {
+          query_block = query_column;
+          key_block = key_row;
+        } else {
+          Matrix *next_query_block =
+              matrix_memory_allocator.Allocate("query block");
+          Matrix *next_key_block =
+              matrix_memory_allocator.Allocate("key block");
+          gpu_sim.Concat(query_block, query_column, next_query_block, 1,
+                         kInSharedMemory);
+          gpu_sim.Concat(key_block, key_row, next_key_block, 0,
+                         kInSharedMemory);
+          gpu_sim.ReleaseMatrix(query_block);
+          gpu_sim.ReleaseMatrix(query_column);
+          gpu_sim.ReleaseMatrix(key_block);
+          gpu_sim.ReleaseMatrix(key_row);
+          query_block = next_query_block;
+          key_block = next_key_block;
+        }
+      }
+      Matrix *partial_scores = matrix_memory_allocator.Allocate("partial scores");
+      gpu_sim.MatMul(query_block, key_block, partial_scores);
+      gpu_sim.ReleaseMatrix(query_block);
+      gpu_sim.ReleaseMatrix(key_block);
+      if (scores == nullptr) {
+        scores = partial_scores;
+      } else {
+        Matrix *next_scores = matrix_memory_allocator.Allocate("scores");
+        gpu_sim.MatAdd(scores, partial_scores, next_scores);
+        gpu_sim.ReleaseMatrix(scores);
+        gpu_sim.ReleaseMatrix(partial_scores);
+        scores = next_scores;
+      }
+    }
     gpu_sim.ReleaseMatrix(query);
     gpu_sim.ReleaseMatrix(key_matrix);
 
