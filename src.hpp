@@ -74,25 +74,8 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     }
     gpu_sim.ReleaseMatrix(scores);
 
-    Matrix *answer = nullptr;
-    for (size_t row = 0; row <= i; ++row) {
-      Matrix *probability_row =
-          matrix_memory_allocator.Allocate("probability row");
-      Matrix *answer_row = matrix_memory_allocator.Allocate("answer row");
-      gpu_sim.GetRow(probabilities, row, probability_row, kInSharedMemory);
-      gpu_sim.MatMul(probability_row, value_matrix, answer_row);
-      gpu_sim.ReleaseMatrix(probability_row);
-
-      if (answer == nullptr) {
-        answer = answer_row;
-      } else {
-        Matrix *next_answer = matrix_memory_allocator.Allocate("answer");
-        gpu_sim.Concat(answer, answer_row, next_answer, 0, kInSharedMemory);
-        gpu_sim.ReleaseMatrix(answer);
-        gpu_sim.ReleaseMatrix(answer_row);
-        answer = next_answer;
-      }
-    }
+    Matrix *answer = matrix_memory_allocator.Allocate("answer");
+    gpu_sim.MatMul(probabilities, value_matrix, answer);
     gpu_sim.ReleaseMatrix(probabilities);
     gpu_sim.ReleaseMatrix(value_matrix);
     gpu_sim.MoveMatrixToGpuHbm(answer);
