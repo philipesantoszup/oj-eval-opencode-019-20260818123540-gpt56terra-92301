@@ -7,47 +7,80 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
                MatrixMemoryAllocator matrix_memory_allocator) {
   assert(keys.size() == values.size());
   for (size_t i = 0; i < keys.size(); ++i) {
-    auto current_query = rater.GetNextQuery();
-    /*
-     * Implement your calculation logic here.
-     * You can use the GpuSimulator instance to perform matrix operations.
-     * For example:
-     * gpu_sim.MoveMatrixToGpuHbm(keys[i]);
-     * When your need a new matrix, to avoid memory leak, you should use
-     * Matrix* new_matrix =
-     * matrix_memory_allocator.Allocate(YOUR_MATRIX_NAME(string, which is
-     * helpful for debugging)); It can manage the memory of matrices
-     * automatically.
-     */
+    Matrix *query = rater.GetNextQuery();
 
-    /*
-     *
-     *
-     *
-     *
-     *
-     *
-     * YOUR CODE HERE
-     *
-     *
-     *
-     *
-     *
-     *
-     */
+    // Keep the supplied one-row matrices in HBM: later rounds reuse them.
+    Matrix *key_matrix = keys[0];
+    Matrix *value_matrix = values[0];
+    for (size_t j = 1; j <= i; ++j) {
+      Matrix *next_key = matrix_memory_allocator.Allocate("keys");
+      Matrix *next_value = matrix_memory_allocator.Allocate("values");
+      gpu_sim.Concat(key_matrix, keys[j], next_key, 0, kInGpuHbm);
+      gpu_sim.Concat(value_matrix, values[j], next_value, 0, kInGpuHbm);
+      if (j > 1) {
+        gpu_sim.ReleaseMatrix(key_matrix);
+        gpu_sim.ReleaseMatrix(value_matrix);
+      }
+      key_matrix = next_key;
+      value_matrix = next_value;
+    }
+
+    // Round one needs disposable copies because its operands are inputs.
+    if (i == 0) {
+      Matrix *key_copy = matrix_memory_allocator.Allocate("key");
+      Matrix *value_copy = matrix_memory_allocator.Allocate("value");
+      gpu_sim.Copy(key_matrix, key_copy, kInGpuHbm);
+      gpu_sim.Copy(value_matrix, value_copy, kInGpuHbm);
+      key_matrix = key_copy;
+      value_matrix = value_copy;
+    }
+
+    gpu_sim.MoveMatrixToSharedMem(query);
+    gpu_sim.MoveMatrixToSharedMem(key_matrix);
+    gpu_sim.MoveMatrixToSharedMem(value_matrix);
+
+    gpu_sim.Transpose(key_matrix, kInSharedMemory);
+    Matrix *scores = matrix_memory_allocator.Allocate("scores");
+    gpu_sim.MatMul(query, key_matrix, scores);
+    gpu_sim.ReleaseMatrix(query);
+    gpu_sim.ReleaseMatrix(key_matrix);
+
+    Matrix *probabilities = nullptr;
+    for (size_t row = 0; row <= i; ++row) {
+      Matrix *score_row = matrix_memory_allocator.Allocate("score row");
+      Matrix *exponentials = matrix_memory_allocator.Allocate("exponentials");
+      Matrix *sum = matrix_memory_allocator.Allocate("sum");
+      Matrix *probability_row =
+          matrix_memory_allocator.Allocate("probability row");
+      gpu_sim.GetRow(scores, row, score_row, kInSharedMemory);
+      gpu_sim.MatExp(score_row, exponentials);
+      gpu_sim.Sum(exponentials, sum);
+      gpu_sim.MatDiv(exponentials, sum, probability_row);
+      gpu_sim.ReleaseMatrix(score_row);
+      gpu_sim.ReleaseMatrix(exponentials);
+      gpu_sim.ReleaseMatrix(sum);
+
+      if (probabilities == nullptr) {
+        probabilities = probability_row;
+      } else {
+        Matrix *next_probabilities =
+            matrix_memory_allocator.Allocate("probabilities");
+        gpu_sim.Concat(probabilities, probability_row, next_probabilities, 0,
+                       kInSharedMemory);
+        gpu_sim.ReleaseMatrix(probabilities);
+        gpu_sim.ReleaseMatrix(probability_row);
+        probabilities = next_probabilities;
+      }
+    }
+    gpu_sim.ReleaseMatrix(scores);
+
+    Matrix *answer = matrix_memory_allocator.Allocate("answer");
+    gpu_sim.MatMul(probabilities, value_matrix, answer);
+    gpu_sim.ReleaseMatrix(probabilities);
+    gpu_sim.ReleaseMatrix(value_matrix);
+    gpu_sim.MoveMatrixToGpuHbm(answer);
     gpu_sim.Run(false, &matrix_memory_allocator);
-    //rater.CommitAnswer(YOUR_ANSWER_MATRIX)(Commit after running the simulator.)
-    /*********************  End of your code *********************/
-  
-    /*
-     * If you want to print debug information, you can use:
-     * gpu_sim.Run(true, &matrix_memory_allocator);
-     * At the end of your calculation, you should commit the answer:
-     * rater.CommitAnswer(YOUR_ANSWER_MATRIX) in each iteration.
-     * Your answer matrix should be in GPU HBM.
-     * After the answer is committed, the answer matrix will be released
-     * automatically.
-     */
+    rater.CommitAnswer(*answer);
   }
 }
 
